@@ -9,6 +9,15 @@
 	"compatibility_date": "2025-10-11",
 	"observability": {
 		"enabled": true
+	},
+	"vectorize": [
+		{
+			"binding": "VECTORIZE",
+			"index_name": "embeddings-index"
+		}
+	],
+	"ai": {
+		"binding": "AI"
 	}
 	/**
 	 * Smart Placement
