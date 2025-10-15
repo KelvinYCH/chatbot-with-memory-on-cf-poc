@@ -239,6 +239,18 @@ Summary:`;
 				clearInterval(interval);
 				controller.enqueue(encoder.encode("event: done\ndata: [DONE]\n\n"));
 				controller.close();
+				
+				// Generate and store summary after conversation
+				try {
+				  const conversationHistory = [
+					`User: ${userMessage}`,
+					`Assistant: ${response}`
+				  ];
+				  await generateAndVectorizeSummary(env, conversationHistory);
+				  console.log("Summary generated and stored for conversation");
+				} catch (summaryError) {
+				  console.error("Error generating summary:", summaryError);
+				}
 			  }
 			}, 100);
 		  } catch (error) {
