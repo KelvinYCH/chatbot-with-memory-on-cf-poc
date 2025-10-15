@@ -56,6 +56,34 @@ export interface Env {
 		return new Response("", { status: 404 });
 	  }
   
+  // Memory management endpoints
+  if (request.method === "DELETE" && path === "/api/memory") {
+	try {
+	  // Create array of IDs from 1 to 100
+	  const idsToDelete = Array.from({ length: 100 }, (_, i) => (i + 1).toString());
+	  
+	  // Call deleteByIds method
+	  const result = await env.VECTORIZE.deleteByIds(idsToDelete);
+	  
+	  return new Response(JSON.stringify({ 
+		message: "Memory deletion completed",
+		deletedIds: idsToDelete,
+		result: result
+	  }), {
+		headers: { "content-type": "application/json" }
+	  });
+	} catch (error) {
+	  console.error("Error deleting memory:", error);
+	  return new Response(JSON.stringify({ 
+		error: `Error deleting memory: ${error instanceof Error ? error.message : 'Unknown error'}`,
+		details: error
+	  }), {
+		status: 500,
+		headers: { "content-type": "application/json" }
+	  });
+	}
+  }
+
   // Chat endpoint that uses OpenRouter API
   if (request.method === "POST" && path === "/api/chat") {
 	try {
@@ -309,8 +337,8 @@ export interface Env {
 			  </div>
 
 			  <div class="toolbar">
-				<button class="tool" aria-disabled="true" title="GET /api/history">Get Chat History</button>
-				<button class="tool" aria-disabled="true" title="GET /api/memory">Get Memory</button>
+				<button class="tool" id="getMemory" title="GET /api/memory">Get Memory</button>
+				<button class="tool danger" id="removeMemory" title="DELETE /api/memory">Remove All Memory</button>
 			  </div>
 			</section>
 
@@ -422,6 +450,38 @@ export interface Env {
 				sendMessage();
 			  }
 			});
+
+			// Get Memory button handler
+			const getMemoryBtn = document.getElementById('getMemory');
+			if (getMemoryBtn) {
+			  getMemoryBtn.addEventListener('click', async () => {
+				try {
+				  const response = await fetch('/api/memory', { method: 'GET' });
+				  const result = await response.json();
+				  console.log('Get memory response:', result);
+				  alert('Get memory endpoint called - check console for response');
+				} catch (error) {
+				  console.error('Error calling get memory:', error);
+				  alert('Error calling get memory endpoint');
+				}
+			  });
+			}
+
+			// Remove Memory button handler
+			const removeMemoryBtn = document.getElementById('removeMemory');
+			if (removeMemoryBtn) {
+			  removeMemoryBtn.addEventListener('click', async () => {
+				try {
+				  const response = await fetch('/api/memory', { method: 'DELETE' });
+				  const result = await response.json();
+				  console.log('Memory deletion response:', result);
+				  alert('Memory deletion completed - check console for details');
+				} catch (error) {
+				  console.error('Error calling memory deletion:', error);
+				  alert('Error calling memory deletion endpoint');
+				}
+			  });
+			}
 		  </script>
 		</body>
 		</html>`;

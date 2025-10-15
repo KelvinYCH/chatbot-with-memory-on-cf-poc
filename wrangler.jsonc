@@ -13,11 +13,13 @@
 	"vectorize": [
 		{
 			"binding": "VECTORIZE",
-			"index_name": "embeddings-index"
+			"index_name": "embeddings-index",
+			"remote": true
 		}
 	],
 	"ai": {
-		"binding": "AI"
+		"binding": "AI",
+		"remote": true
 	}
 	/**
 	 * Smart Placement
