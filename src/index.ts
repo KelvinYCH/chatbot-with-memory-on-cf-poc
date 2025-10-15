@@ -148,15 +148,58 @@ export interface Env {
   // Memory management endpoints
   if (request.method === "GET" && path === "/api/memory") {
 	try {
-	  // For now, let's just return a simple response
-	  // In a real app, you'd query the Vectorize index
+	  // Get current message ID from KV
+	  let currentId = await env.messageId.get("currentId");
+	  let messageId = currentId ? parseInt(currentId) : 0;
+	  
+	  if (messageId === 0) {
+		return new Response(JSON.stringify({ 
+		  memories: [],
+		  count: 0,
+		  message: "No memories found"
+		}), {
+		  headers: { "content-type": "application/json" }
+		});
+	  }
+	  
+	  // Get the latest 10 memories by IDs
+	  const startId = Math.max(1, messageId - 9); // Get last 10 IDs
+	  const ids = Array.from({ length: Math.min(10, messageId) }, (_, i) => (startId + i).toString());
+	  
+	  const matches = await env.VECTORIZE.getByIds(ids);
+	  
+	  // Process the memories
+	  const memories = [];
+	  if (matches && matches.length > 0) {
+		matches.forEach((match: any) => {
+		  if (match.metadata && match.metadata.memory) {
+			const vector = match.values || [];
+			const vectorPreview = vector.length > 0 ? 
+			  `[${vector[0].toFixed(4)}, ..., ${vector[vector.length - 1].toFixed(4)}]` : 
+			  '[]';
+			
+			memories.push({
+			  id: match.id,
+			  vector: vectorPreview,
+			  message: match.metadata.memory,
+			  timestamp: match.metadata.timestamp || 'Unknown'
+			});
+		  }
+		});
+	  }
+	  
+	  // Sort by ID (newest first)
+	  memories.sort((a, b) => parseInt(b.id) - parseInt(a.id));
+	  
 	  return new Response(JSON.stringify({ 
-		message: "Memory endpoint - would query Vectorize index",
-		note: "This would typically search the vector database for relevant memories"
+		memories: memories,
+		count: memories.length,
+		total: messageId
 	  }), {
 		headers: { "content-type": "application/json" }
 	  });
 	} catch (error) {
+	  console.error("Error getting memory:", error);
 	  return new Response(JSON.stringify({ 
 		error: `Error getting memory: ${error instanceof Error ? error.message : 'Unknown error'}` 
 	  }), {
@@ -418,6 +461,84 @@ export interface Env {
 			}
 			.tool.danger { background: rgba(255, 107, 107, 0.14); border-color: rgba(255, 107, 107, 0.35); }
 
+			/* Modal styles */
+			.modal {
+			  display: none;
+			  position: fixed;
+			  z-index: 1000;
+			  left: 0;
+			  top: 0;
+			  width: 100%;
+			  height: 100%;
+			  background-color: rgba(0, 0, 0, 0.5);
+			  backdrop-filter: blur(4px);
+			}
+			.modal-content {
+			  background: var(--card);
+			  border: 1px solid var(--card-border);
+			  border-radius: 14px;
+			  margin: 5% auto;
+			  padding: 20px;
+			  width: 90%;
+			  max-width: 800px;
+			  max-height: 80vh;
+			  overflow-y: auto;
+			  box-shadow: 0 20px 40px rgba(0,0,0,0.3);
+			}
+			.modal-header {
+			  display: flex;
+			  justify-content: space-between;
+			  align-items: center;
+			  margin-bottom: 20px;
+			  padding-bottom: 10px;
+			  border-bottom: 1px solid var(--card-border);
+			}
+			.modal-title {
+			  font-size: 18px;
+			  font-weight: 600;
+			  color: var(--text);
+			}
+			.close {
+			  color: var(--muted);
+			  font-size: 28px;
+			  font-weight: bold;
+			  cursor: pointer;
+			  line-height: 1;
+			}
+			.close:hover { color: var(--text); }
+			.memory-table {
+			  width: 100%;
+			  border-collapse: collapse;
+			  margin-top: 10px;
+			}
+			.memory-table th,
+			.memory-table td {
+			  padding: 12px;
+			  text-align: left;
+			  border-bottom: 1px solid var(--card-border);
+			}
+			.memory-table th {
+			  background: rgba(255, 255, 255, 0.05);
+			  font-weight: 600;
+			  color: var(--text);
+			}
+			.memory-table td {
+			  color: var(--muted);
+			  font-size: 14px;
+			}
+			.memory-table tr:hover {
+			  background: rgba(255, 255, 255, 0.02);
+			}
+			.vector-preview {
+			  font-family: monospace;
+			  font-size: 12px;
+			  color: var(--accent);
+			}
+			.message-cell {
+			  max-width: 300px;
+			  word-wrap: break-word;
+			}
+
 			.footer { color: var(--muted); font-size: 12px; text-align: center; padding: 10px 0 20px 0; }
 
 			/* Responsive tweaks */
@@ -454,6 +575,19 @@ export interface Env {
 			</section>
 
 			<footer class="footer">Chatbot with Memory — Powered by OpenRouter AI & Cloudflare Vectorize</footer>
+		  </div>
+
+		  <!-- Memory Modal -->
+		  <div id="memoryModal" class="modal">
+			<div class="modal-content">
+			  <div class="modal-header">
+				<h2 class="modal-title">Memory Database</h2>
+				<span class="close">&times;</span>
+			  </div>
+			  <div id="memoryContent">
+				<p>Loading memories...</p>
+			  </div>
+			</div>
 		  </div>
 		  <script>
 			const messages = document.getElementById('messages');
@@ -535,19 +669,67 @@ export interface Env {
 
 			// Get Memory button handler
 			const getMemoryBtn = document.getElementById('getMemory');
+			const memoryModal = document.getElementById('memoryModal');
+			const memoryContent = document.getElementById('memoryContent');
+			const closeBtn = document.querySelector('.close');
+			
 			if (getMemoryBtn) {
 			  getMemoryBtn.addEventListener('click', async () => {
 				try {
+				  memoryContent.innerHTML = '<p>Loading memories...</p>';
+				  memoryModal.style.display = 'block';
+				  
 				  const response = await fetch('/api/memory', { method: 'GET' });
 				  const result = await response.json();
-				  console.log('Get memory response:', result);
-				  alert('Get memory endpoint called - check console for response');
+				  
+				  if (result.memories && result.memories.length > 0) {
+					// Create table HTML
+					let tableHTML = '<p>Found ' + result.count + ' memories (showing latest 10)</p>' +
+					  '<table class="memory-table">' +
+						'<thead>' +
+						  '<tr>' +
+							'<th>ID</th>' +
+							'<th>Vector Preview</th>' +
+							'<th>Original Message</th>' +
+							'<th>Timestamp</th>' +
+						  '</tr>' +
+						'</thead>' +
+						'<tbody>';
+					
+					result.memories.forEach(memory => {
+					  tableHTML += '<tr>' +
+						'<td>' + memory.id + '</td>' +
+						'<td><span class="vector-preview">' + memory.vector + '</span></td>' +
+						'<td class="message-cell">' + memory.message + '</td>' +
+						'<td>' + new Date(memory.timestamp).toLocaleString() + '</td>' +
+					  '</tr>';
+					});
+					
+					tableHTML += '</tbody></table>';
+					memoryContent.innerHTML = tableHTML;
+				  } else {
+					memoryContent.innerHTML = '<p>No memories found. Start chatting to create memories!</p>';
+				  }
 				} catch (error) {
 				  console.error('Error calling get memory:', error);
-				  alert('Error calling get memory endpoint');
+				  memoryContent.innerHTML = '<p>Error loading memories. Please try again.</p>';
 				}
 			  });
 			}
+			
+			// Close modal handlers
+			if (closeBtn) {
+			  closeBtn.addEventListener('click', () => {
+				memoryModal.style.display = 'none';
+			  });
+			}
+			
+			// Close modal when clicking outside
+			window.addEventListener('click', (event) => {
+			  if (event.target === memoryModal) {
+				memoryModal.style.display = 'none';
+			  }
+			});
 
 
 			// Remove Memory button handler
