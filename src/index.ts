@@ -27,6 +27,16 @@ export interface Env {
 	}>;
   }
 
+  interface VectorizeVector {
+	id: string;
+	values: number[];
+	metadata?: {
+	  summary?: string;
+	  timestamp?: string;
+	  type?: string;
+	};
+  }
+
   async function callOpenRouter(env: Env, messages: OpenRouterMessage[]): Promise<string> {
 	const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
 	  method: "POST",
@@ -47,6 +57,59 @@ export interface Env {
 	const data: OpenRouterResponse = await response.json();
 	return data.choices[0]?.message?.content || "No response generated";
   }
+
+  async function generateAndVectorizeSummary(env: Env, conversationHistory: string[]): Promise<void> {
+	try {
+	  // Generate summary using OpenRouter AI
+	  const summaryPrompt = `Please provide a concise summary of the following conversation in 1-2 sentences. Focus on the key topics and main points discussed:
+
+${conversationHistory.join('\n\n')}
+
+Summary:`;
+
+	  const summaryMessages: OpenRouterMessage[] = [
+		{
+		  role: "user",
+		  content: summaryPrompt
+		}
+	  ];
+
+	  const summary = await callOpenRouter(env, summaryMessages);
+	  console.log("Generated summary:", summary);
+
+	  // Generate embeddings for the summary
+	  const modelResp: EmbeddingResponse = await env.AI.run(
+		"@cf/baai/bge-base-en-v1.5",
+		{
+		  text: summary,
+		},
+	  );
+
+	  // Convert the vector embeddings into a format Vectorize can accept
+	  let vectors: VectorizeVector[] = [];
+	  let id = 1;
+	  modelResp.data.forEach((vector) => {
+		vectors.push({ 
+		  id: `${id}`, 
+		  values: vector,
+		  metadata: {
+			summary: summary,
+			timestamp: new Date().toISOString(),
+			type: "conversation_summary"
+		  }
+		});
+		id++;
+	  });
+
+	  // Insert into Vectorize
+	  let inserted = await env.VECTORIZE.upsert(vectors);
+	  console.log("Vectorize upsert result:", inserted);
+
+	} catch (error) {
+	  console.error("Error generating and vectorizing summary:", error);
+	  throw error;
+	}
+  }
   
   export default {
 	async fetch(request, env, ctx): Promise<Response> {
@@ -57,6 +120,60 @@ export interface Env {
 	  }
   
   // Memory management endpoints
+  if (request.method === "GET" && path === "/api/memory") {
+	try {
+	  // For now, let's just return a simple response
+	  // In a real app, you'd query the Vectorize index
+	  return new Response(JSON.stringify({ 
+		message: "Memory endpoint - would query Vectorize index",
+		note: "This would typically search the vector database for relevant memories"
+	  }), {
+		headers: { "content-type": "application/json" }
+	  });
+	} catch (error) {
+	  return new Response(JSON.stringify({ 
+		error: `Error getting memory: ${error instanceof Error ? error.message : 'Unknown error'}` 
+	  }), {
+		status: 500,
+		headers: { "content-type": "application/json" }
+	  });
+	}
+  }
+
+  if (request.method === "POST" && path === "/api/memory") {
+	try {
+	  const body = await request.json() as { conversationHistory?: string[] };
+	  const conversationHistory = body.conversationHistory || [];
+	  
+	  if (conversationHistory.length === 0) {
+		return new Response(JSON.stringify({ 
+		  error: "No conversation history provided" 
+		}), {
+		  status: 400,
+		  headers: { "content-type": "application/json" }
+		});
+	  }
+
+	  // Generate summary and vectorize it
+	  await generateAndVectorizeSummary(env, conversationHistory);
+	  
+	  return new Response(JSON.stringify({ 
+		message: "Summary generated and stored in vector database",
+		conversationLength: conversationHistory.length
+	  }), {
+		headers: { "content-type": "application/json" }
+	  });
+	} catch (error) {
+	  console.error("Error generating summary:", error);
+	  return new Response(JSON.stringify({ 
+		error: `Error generating summary: ${error instanceof Error ? error.message : 'Unknown error'}` 
+	  }), {
+		status: 500,
+		headers: { "content-type": "application/json" }
+	  });
+	}
+  }
+
   if (request.method === "DELETE" && path === "/api/memory") {
 	try {
 	  // Create array of IDs from 1 to 100
@@ -338,6 +455,7 @@ export interface Env {
 
 			  <div class="toolbar">
 				<button class="tool" id="getMemory" title="GET /api/memory">Get Memory</button>
+				<button class="tool" id="generateSummary" title="POST /api/memory">Generate Summary</button>
 				<button class="tool danger" id="removeMemory" title="DELETE /api/memory">Remove All Memory</button>
 			  </div>
 			</section>
@@ -361,7 +479,9 @@ export interface Env {
 			  meta.className = 'meta';
 			  meta.textContent = me ? 'You • just now' : 'Assistant • just now';
 			  const body = document.createElement('div');
-			  body.textContent = text || '';
+			  // Convert \n\n\n\n to actual line breaks in HTML
+			  const processedText = (text || '').replace(/\\n\\n\\n\\n/g, '<br><br>');
+			  body.innerHTML = processedText;
 			  bubble.appendChild(meta);
 			  bubble.appendChild(body);
 			  wrap.appendChild(avatar);
@@ -423,7 +543,9 @@ export interface Env {
 					  break;
 					}
 					if (data) {
-					  assistantBody.textContent += data;
+					  // Convert \n\n\n\n to actual line breaks in HTML
+					  const processedData = data.replace(/\\n\\n\\n\\n/g, '<br><br>');
+					  assistantBody.innerHTML += processedData;
 					  messages.scrollTop = messages.scrollHeight;
 					}
 				  }
@@ -463,6 +585,47 @@ export interface Env {
 				} catch (error) {
 				  console.error('Error calling get memory:', error);
 				  alert('Error calling get memory endpoint');
+				}
+			  });
+			}
+
+			// Generate Summary button handler
+			const generateSummaryBtn = document.getElementById('generateSummary');
+			if (generateSummaryBtn) {
+			  generateSummaryBtn.addEventListener('click', async () => {
+				try {
+				  // Get conversation history from the messages
+				  const messages = document.querySelectorAll('.message');
+				  const conversationHistory = [];
+				  
+				  messages.forEach(message => {
+					const bubble = message.querySelector('.bubble');
+					if (bubble) {
+					  const meta = bubble.querySelector('.meta');
+					  const body = bubble.querySelector('div:last-child');
+					  if (meta && body) {
+						const role = meta.textContent.includes('You') ? 'User' : 'Assistant';
+						conversationHistory.push(role + ': ' + body.textContent);
+					  }
+					}
+				  });
+
+				  if (conversationHistory.length === 0) {
+					alert('No conversation history found. Please have a conversation first.');
+					return;
+				  }
+
+				  const response = await fetch('/api/memory', { 
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({ conversationHistory })
+				  });
+				  const result = await response.json();
+				  console.log('Summary generation response:', result);
+				  alert('Summary generated and stored in vector database!');
+				} catch (error) {
+				  console.error('Error generating summary:', error);
+				  alert('Error generating summary');
 				}
 			  });
 			}
