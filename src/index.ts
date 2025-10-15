@@ -1,10 +1,51 @@
 export interface Env {
 	VECTORIZE: Vectorize;
 	AI: Ai;
+	OPENROUTER_API_KEY: string;
   }
   interface EmbeddingResponse {
 	shape: number[];
 	data: number[][];
+  }
+
+  interface OpenRouterMessage {
+	role: "user" | "assistant" | "system";
+	content: string | Array<{
+	  type: "text" | "image_url";
+	  text?: string;
+	  image_url?: {
+		url: string;
+	  };
+	}>;
+  }
+
+  interface OpenRouterResponse {
+	choices: Array<{
+	  message: {
+		content: string;
+	  };
+	}>;
+  }
+
+  async function callOpenRouter(env: Env, messages: OpenRouterMessage[]): Promise<string> {
+	const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+	  method: "POST",
+	  headers: {
+		"Authorization": `Bearer ${env.OPENROUTER_API_KEY}`,
+		"Content-Type": "application/json"
+	  },
+	  body: JSON.stringify({
+		model: "mistralai/mistral-small-3.1-24b-instruct:free",
+		messages: messages
+	  })
+	});
+
+	if (!response.ok) {
+	  throw new Error(`OpenRouter API error: ${response.status} ${response.statusText}`);
+	}
+
+	const data: OpenRouterResponse = await response.json();
+	return data.choices[0]?.message?.content || "No response generated";
   }
   
   export default {
@@ -15,46 +56,69 @@ export interface Env {
 		return new Response("", { status: 404 });
 	  }
   
-	  // Minimal SSE chat endpoint (POST) that streams a fake response
-	  if (request.method === "POST" && path === "/api/chat") {
-		const encoder = new TextEncoder();
-		const stream = new ReadableStream<Uint8Array>({
-		  start(controller) {
-			// Simple tokenized fake reply
-			const tokens = [
-			  "Thanks ",
-			  "for ",
-			  "your ",
-			  "message! ",
-			  "This ",
-			  "is ",
-			  "a ",
-			  "streamed ",
-			  "response ",
-			  "using ",
-			  "SSE."
+  // Chat endpoint that uses OpenRouter API
+  if (request.method === "POST" && path === "/api/chat") {
+	try {
+	  const body = await request.json() as { message?: string; text?: string };
+	  const userMessage = body.message || body.text || "";
+	  
+	  if (!userMessage.trim()) {
+		return new Response(JSON.stringify({ error: "Message is required" }), {
+		  status: 400,
+		  headers: { "content-type": "application/json" }
+		});
+	  }
+
+	  const encoder = new TextEncoder();
+	  const stream = new ReadableStream<Uint8Array>({
+		async start(controller) {
+		  try {
+			// Call OpenRouter API
+			const messages: OpenRouterMessage[] = [
+			  {
+				role: "user",
+				content: userMessage
+			  }
 			];
+			
+			const response = await callOpenRouter(env, messages);
+			
+			// Stream the response word by word for smooth typing effect
+			const words = response.split(/(\s+)/);
 			let i = 0;
 			const interval = setInterval(() => {
-			  if (i < tokens.length) {
-				const chunk = `data: ${tokens[i++]}\n\n`;
+			  if (i < words.length) {
+				const chunk = `data: ${words[i++]}\n\n`;
 				controller.enqueue(encoder.encode(chunk));
 			  } else {
 				clearInterval(interval);
 				controller.enqueue(encoder.encode("event: done\ndata: [DONE]\n\n"));
 				controller.close();
 			  }
-			}, 150);
+			}, 100);
+		  } catch (error) {
+			const errorMessage = `Error: ${error instanceof Error ? error.message : 'Unknown error'}`;
+			controller.enqueue(encoder.encode(`data: ${errorMessage}\n\n`));
+			controller.enqueue(encoder.encode("event: done\ndata: [DONE]\n\n"));
+			controller.close();
 		  }
-		});
-		return new Response(stream, {
-		  headers: {
-			"content-type": "text/event-stream; charset=utf-8",
-			"cache-control": "no-cache",
-			"connection": "keep-alive",
-		  },
-		});
-	  }
+		}
+	  });
+	  
+	  return new Response(stream, {
+		headers: {
+		  "content-type": "text/event-stream; charset=utf-8",
+		  "cache-control": "no-cache",
+		  "connection": "keep-alive",
+		},
+	  });
+	} catch (error) {
+	  return new Response(JSON.stringify({ error: "Invalid request body" }), {
+		status: 400,
+		headers: { "content-type": "application/json" }
+	  });
+	}
+  }
 
 	  // Serve a static prototype UI. Future APIs (not implemented here):
 	  // - GET /api/history   -> get chat history
@@ -293,7 +357,13 @@ export interface Env {
 			  sendBtn.setAttribute('data-busy', 'true');
 
 			  try {
-				const res = await fetch('/api/chat', { method: 'POST' });
+				const res = await fetch('/api/chat', { 
+				  method: 'POST',
+				  headers: {
+					'Content-Type': 'application/json'
+				  },
+				  body: JSON.stringify({ message: text })
+				});
 				if (!res.ok || !res.body) throw new Error('Network error');
 				const reader = res.body.getReader();
 				const decoder = new TextDecoder();
@@ -302,6 +372,10 @@ export interface Env {
 				  const { value, done } = await reader.read();
 				  if (done) break;
 				  buffer += decoder.decode(value, { stream: true });
+				  
+				  // Debug: log what we're receiving
+				  console.log('Received buffer:', JSON.stringify(buffer));
+				  
 				  let parts = buffer.split('\\n\\n');
 				  buffer = parts.pop() || '';
 				  for (const part of parts) {
@@ -310,9 +384,13 @@ export interface Env {
 					let dataLines = [];
 					for (const line of lines) {
 					  if (line.startsWith('event:')) eventName = line.slice(6).trim();
-					  if (line.startsWith('data:')) dataLines.push(line.slice(5).trim());
+					  if (line.startsWith('data:')) dataLines.push(line.slice(5));
 					}
-					const data = dataLines.join('\\n');
+					const data = dataLines.join('');
+					
+					// Debug: log what data we're extracting
+					console.log('Extracted data:', JSON.stringify(data));
+					
 					if (eventName === 'done' || data === '[DONE]') {
 					  break;
 					}
