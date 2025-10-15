@@ -302,7 +302,7 @@ export interface Env {
 			  background: rgba(255, 255, 255, 0.06);
 			  color: var(--text);
 			  text-align: center;
-			  cursor: not-allowed; /* placeholder - no events wired */
+			  cursor: pointer;
 			}
 			.tool.danger { background: rgba(255, 107, 107, 0.14); border-color: rgba(255, 107, 107, 0.35); }
 
@@ -478,7 +478,6 @@ export interface Env {
 				  alert('Memory deletion completed - check console for details');
 				} catch (error) {
 				  console.error('Error calling memory deletion:', error);
-				  alert('Error calling memory deletion endpoint');
 				}
 			  });
 			}
