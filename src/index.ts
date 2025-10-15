@@ -2,6 +2,7 @@ export interface Env {
 	VECTORIZE: Vectorize;
 	AI: Ai;
 	OPENROUTER_API_KEY: string;
+	messageId: KVNamespace;
   }
   interface EmbeddingResponse {
 	shape: number[];
@@ -31,7 +32,7 @@ export interface Env {
 	id: string;
 	values: number[];
 	metadata?: {
-	  summary?: string;
+	  memory?: string;
 	  timestamp?: string;
 	  type?: string;
 	};
@@ -58,56 +59,81 @@ export interface Env {
 	return data.choices[0]?.message?.content || "No response generated";
   }
 
-  async function generateAndVectorizeSummary(env: Env, conversationHistory: string[]): Promise<void> {
+  async function storeUserMemory(env: Env, userMessage: string): Promise<void> {
 	try {
-	  // Generate summary using OpenRouter AI
-	  const summaryPrompt = `Please provide a concise summary of the following conversation in 1-2 sentences. Focus on the key topics and main points discussed:
-
-${conversationHistory.join('\n\n')}
-
-Summary:`;
-
-	  const summaryMessages: OpenRouterMessage[] = [
-		{
-		  role: "user",
-		  content: summaryPrompt
-		}
-	  ];
-
-	  const summary = await callOpenRouter(env, summaryMessages);
-	  console.log("Generated summary:", summary);
-
-	  // Generate embeddings for the summary
+	  // Generate embeddings for the user message directly
 	  const modelResp: EmbeddingResponse = await env.AI.run(
 		"@cf/baai/bge-base-en-v1.5",
 		{
-		  text: summary,
+		  text: [userMessage],
 		},
 	  );
 
+	  // Get current message ID from KV and increment it
+	  let currentId = await env.messageId.get("currentId");
+	  let messageId = currentId ? parseInt(currentId) + 1 : 1;
+	  
+	  // Update KV with new message ID
+	  await env.messageId.put("currentId", messageId.toString());
+
 	  // Convert the vector embeddings into a format Vectorize can accept
 	  let vectors: VectorizeVector[] = [];
-	  let id = 1;
 	  modelResp.data.forEach((vector) => {
 		vectors.push({ 
-		  id: `${id}`, 
+		  id: `${messageId}`, 
 		  values: vector,
 		  metadata: {
-			summary: summary,
+			memory: userMessage,
 			timestamp: new Date().toISOString(),
-			type: "conversation_summary"
+			type: "user_message"
 		  }
 		});
-		id++;
 	  });
 
 	  // Insert into Vectorize
-	  let inserted = await env.VECTORIZE.upsert(vectors);
-	  console.log("Vectorize upsert result:", inserted);
+	  let inserted = await env.VECTORIZE.insert(vectors);
+	  console.log("Vectorize insert result:", inserted);
+	  console.log("Inserted user message with ID:", messageId);
 
 	} catch (error) {
-	  console.error("Error generating and vectorizing summary:", error);
+	  console.error("Error storing user memory:", error);
 	  throw error;
+	}
+  }
+
+  async function getMemoryByChat(env: Env, userQuery: string): Promise<string[]> {
+	try {
+	  // Generate embeddings for the user query
+	  const queryVector: EmbeddingResponse = await env.AI.run(
+		"@cf/baai/bge-base-en-v1.5",
+		{
+		  text: [userQuery],
+		},
+	  );
+
+	  // Query Vectorize for similar memories
+	  let matches = await env.VECTORIZE.query(queryVector.data[0], {
+		topK: 3,
+		returnValues: true,
+		returnMetadata: "all",
+	  });
+
+	  // Extract memories from matches
+	  const memories: string[] = [];
+	  if (matches && matches.matches && matches.matches.length > 0) {
+		matches.matches.forEach((match: any) => {
+		  if (match.metadata && match.metadata.memory) {
+			memories.push(match.metadata.memory);
+		  }
+		});
+	  }
+
+	  console.log("Found memories:", memories);
+	  return memories;
+
+	} catch (error) {
+	  console.error("Error getting memory by chat:", error);
+	  return [];
 	}
   }
   
@@ -140,51 +166,34 @@ Summary:`;
 	}
   }
 
-  if (request.method === "POST" && path === "/api/memory") {
+  if (request.method === "DELETE" && path === "/api/memory") {
 	try {
-	  const body = await request.json() as { conversationHistory?: string[] };
-	  const conversationHistory = body.conversationHistory || [];
+	  // Get current message ID from KV
+	  let currentId = await env.messageId.get("currentId");
+	  let messageId = currentId ? parseInt(currentId) : 0;
 	  
-	  if (conversationHistory.length === 0) {
+	  if (messageId === 0) {
 		return new Response(JSON.stringify({ 
-		  error: "No conversation history provided" 
+		  message: "No memories to delete",
+		  currentId: messageId
 		}), {
-		  status: 400,
 		  headers: { "content-type": "application/json" }
 		});
 	  }
-
-	  // Generate summary and vectorize it
-	  await generateAndVectorizeSummary(env, conversationHistory);
 	  
-	  return new Response(JSON.stringify({ 
-		message: "Summary generated and stored in vector database",
-		conversationLength: conversationHistory.length
-	  }), {
-		headers: { "content-type": "application/json" }
-	  });
-	} catch (error) {
-	  console.error("Error generating summary:", error);
-	  return new Response(JSON.stringify({ 
-		error: `Error generating summary: ${error instanceof Error ? error.message : 'Unknown error'}` 
-	  }), {
-		status: 500,
-		headers: { "content-type": "application/json" }
-	  });
-	}
-  }
-
-  if (request.method === "DELETE" && path === "/api/memory") {
-	try {
-	  // Create array of IDs from 1 to 100
-	  const idsToDelete = Array.from({ length: 100 }, (_, i) => (i + 1).toString());
+	  // Create array of IDs from 1 to current messageId
+	  const idsToDelete = Array.from({ length: messageId }, (_, i) => (i + 1).toString());
 	  
 	  // Call deleteByIds method
 	  const result = await env.VECTORIZE.deleteByIds(idsToDelete);
 	  
+	  // Reset message ID to 0 in KV
+	  await env.messageId.put("currentId", "0");
+	  
 	  return new Response(JSON.stringify({ 
 		message: "Memory deletion completed",
 		deletedIds: idsToDelete,
+		deletedCount: idsToDelete.length,
 		result: result
 	  }), {
 		headers: { "content-type": "application/json" }
@@ -214,60 +223,38 @@ Summary:`;
 		});
 	  }
 
-	  const encoder = new TextEncoder();
-	  const stream = new ReadableStream<Uint8Array>({
-		async start(controller) {
-		  try {
-			// Call OpenRouter API
-			const messages: OpenRouterMessage[] = [
-			  {
-				role: "user",
-				content: userMessage
-			  }
-			];
-			
-			const response = await callOpenRouter(env, messages);
-			
-			// Stream the response word by word for smooth typing effect
-			const words = response.split(/(\s+)/);
-			let i = 0;
-			const interval = setInterval(() => {
-			  if (i < words.length) {
-				const chunk = `data: ${words[i++]}\n\n`;
-				controller.enqueue(encoder.encode(chunk));
-			  } else {
-				clearInterval(interval);
-				controller.enqueue(encoder.encode("event: done\ndata: [DONE]\n\n"));
-				controller.close();
-				
-				// Generate and store summary after conversation
-				try {
-				  const conversationHistory = [
-					`User: ${userMessage}`,
-					`Assistant: ${response}`
-				  ];
-				  await generateAndVectorizeSummary(env, conversationHistory);
-				  console.log("Summary generated and stored for conversation");
-				} catch (summaryError) {
-				  console.error("Error generating summary:", summaryError);
-				}
-			  }
-			}, 100);
-		  } catch (error) {
-			const errorMessage = `Error: ${error instanceof Error ? error.message : 'Unknown error'}`;
-			controller.enqueue(encoder.encode(`data: ${errorMessage}\n\n`));
-			controller.enqueue(encoder.encode("event: done\ndata: [DONE]\n\n"));
-			controller.close();
-		  }
-		}
-	  });
+	  // Get relevant memories from vector database
+	  const memories = await getMemoryByChat(env, userMessage);
 	  
-	  return new Response(stream, {
-		headers: {
-		  "content-type": "text/event-stream; charset=utf-8",
-		  "cache-control": "no-cache",
-		  "connection": "keep-alive",
-		},
+	  // Build context with memories
+	  let contextPrompt = userMessage;
+	  if (memories.length > 0) {
+		contextPrompt = `This is some chat history that you may take as reference data:\n\n${memories.join('\n\n')}\n\nUser's current question: ${userMessage}`;
+	  }
+	  console.log(contextPrompt)
+	  // Call OpenRouter API with context
+	  const messages: OpenRouterMessage[] = [
+		{
+		  role: "user",
+		  content: contextPrompt
+		}
+	  ];
+			
+	  const response = await callOpenRouter(env, messages);
+			
+	  // Store user message as memory
+	  try {
+		await storeUserMemory(env, userMessage);
+		console.log("User message stored as memory");
+	  } catch (memoryError) {
+		console.error("Error storing user memory:", memoryError);
+	  }
+	  
+	  return new Response(JSON.stringify({ 
+		message: response,
+		success: true
+	  }), {
+		headers: { "content-type": "application/json" }
 	  });
 	} catch (error) {
 	  return new Response(JSON.stringify({ error: "Invalid request body" }), {
@@ -409,17 +396,13 @@ Summary:`;
 			  color: var(--text);
 			  cursor: pointer;
 			}
-			.button .label-stop { display: none; }
-			.button[data-busy="true"] { background: linear-gradient(135deg, rgba(255, 107, 107, 0.25), rgba(255, 160, 122, 0.18)); border-color: rgba(255, 107, 107, 0.35); }
-			/* Only show Stop label when busy AND hovered */
-			.button[data-busy="true"]:hover .label-send { display: none; }
-			.button[data-busy="true"]:hover .label-stop { display: inline; }
+			.button[data-busy="true"] { background: linear-gradient(135deg, rgba(124, 156, 246, 0.1), rgba(110, 231, 249, 0.08)); opacity: 0.7; }
 
 			.toolbar {
 			  position: sticky;
 			  bottom: 0;
 			  display: grid;
-			  grid-template-columns: repeat(4, 1fr);
+			  grid-template-columns: 1fr 1fr;
 			  gap: 10px;
 			  padding: 12px 14px;
 			  margin-top: 14px;
@@ -441,7 +424,6 @@ Summary:`;
 			@media (max-width: 680px) {
 			  .messages { height: 58dvh; }
 			  .header { flex-direction: column; align-items: flex-start; gap: 6px; }
-			  .toolbar { grid-template-columns: 1fr 1fr; }
 			}
 		  </style>
 		</head>
@@ -462,17 +444,16 @@ Summary:`;
 
 			  <div class="input-row">
 				<input class="input" id="input" placeholder="Type a message..." />
-				<button class="button" id="send"><span class="label-send">Send</span><span class="label-stop">Stop</span></button>
+				<button class="button" id="send">Send</button>
 			  </div>
 
 			  <div class="toolbar">
 				<button class="tool" id="getMemory" title="GET /api/memory">Get Memory</button>
-				<button class="tool" id="generateSummary" title="POST /api/memory">Generate Summary</button>
 				<button class="tool danger" id="removeMemory" title="DELETE /api/memory">Remove All Memory</button>
 			  </div>
 			</section>
 
-			<footer class="footer">Prototype UI — endpoints pending: /api/history, /api/memory</footer>
+			<footer class="footer">Chatbot with Memory — Powered by OpenRouter AI & Cloudflare Vectorize</footer>
 		  </div>
 		  <script>
 			const messages = document.getElementById('messages');
@@ -491,9 +472,9 @@ Summary:`;
 			  meta.className = 'meta';
 			  meta.textContent = me ? 'You • just now' : 'Assistant • just now';
 			  const body = document.createElement('div');
-			  // Convert \n\n\n\n to actual line breaks in HTML
-			  const processedText = (text || '').replace(/\\n\\n\\n\\n/g, '<br><br>');
-			  body.innerHTML = processedText;
+			  const processedText = (text || '').replace(/\\n\\n\\n\\n/g, '<br/>');
+			  body.textContent = processedText;
+			  body.style.whiteSpace = 'pre-line';
 			  bubble.appendChild(meta);
 			  bubble.appendChild(body);
 			  wrap.appendChild(avatar);
@@ -524,43 +505,16 @@ Summary:`;
 				  },
 				  body: JSON.stringify({ message: text })
 				});
-				if (!res.ok || !res.body) throw new Error('Network error');
-				const reader = res.body.getReader();
-				const decoder = new TextDecoder();
-				let buffer = '';
-				while (true) {
-				  const { value, done } = await reader.read();
-				  if (done) break;
-				  buffer += decoder.decode(value, { stream: true });
-				  
-				  // Debug: log what we're receiving
-				  console.log('Received buffer:', JSON.stringify(buffer));
-				  
-				  let parts = buffer.split('\\n\\n');
-				  buffer = parts.pop() || '';
-				  for (const part of parts) {
-					const lines = part.split('\\n');
-					let eventName = null;
-					let dataLines = [];
-					for (const line of lines) {
-					  if (line.startsWith('event:')) eventName = line.slice(6).trim();
-					  if (line.startsWith('data:')) dataLines.push(line.slice(5));
-					}
-					const data = dataLines.join('');
-					
-					// Debug: log what data we're extracting
-					console.log('Extracted data:', JSON.stringify(data));
-					
-					if (eventName === 'done' || data === '[DONE]') {
-					  break;
-					}
-					if (data) {
-					  // Convert \n\n\n\n to actual line breaks in HTML
-					  const processedData = data.replace(/\\n\\n\\n\\n/g, '<br><br>');
-					  assistantBody.innerHTML += processedData;
-					  messages.scrollTop = messages.scrollHeight;
-					}
-				  }
+				if (!res.ok) throw new Error('Network error');
+				
+				const result = await res.json();
+				if (result.success && result.message) {
+				  // Process the message and display it
+				  const processedMessage = result.message.replace(/\\n\\n\\n\\n/g, '<br/>');
+				  assistantBody.innerHTML = processedMessage;
+				  messages.scrollTop = messages.scrollHeight;
+				} else {
+				  assistantBody.textContent = 'Error: ' + (result.error || 'Unknown error');
 				}
 			  } catch (err) {
 				assistantBody.textContent = '[Error receiving response]';
@@ -571,13 +525,7 @@ Summary:`;
 			  }
 			}
 
-			sendBtn.addEventListener('click', (e) => {
-			  if (sendBtn.getAttribute('data-busy') === 'true') {
-				// Busy state: ignore clicks (hover shows Stop label only)
-				return;
-			  }
-			  sendMessage();
-			});
+			sendBtn.addEventListener('click', sendMessage);
 			input.addEventListener('keydown', (e) => {
 			  if (e.key === 'Enter' && !e.shiftKey) {
 				e.preventDefault();
@@ -601,46 +549,6 @@ Summary:`;
 			  });
 			}
 
-			// Generate Summary button handler
-			const generateSummaryBtn = document.getElementById('generateSummary');
-			if (generateSummaryBtn) {
-			  generateSummaryBtn.addEventListener('click', async () => {
-				try {
-				  // Get conversation history from the messages
-				  const messages = document.querySelectorAll('.message');
-				  const conversationHistory = [];
-				  
-				  messages.forEach(message => {
-					const bubble = message.querySelector('.bubble');
-					if (bubble) {
-					  const meta = bubble.querySelector('.meta');
-					  const body = bubble.querySelector('div:last-child');
-					  if (meta && body) {
-						const role = meta.textContent.includes('You') ? 'User' : 'Assistant';
-						conversationHistory.push(role + ': ' + body.textContent);
-					  }
-					}
-				  });
-
-				  if (conversationHistory.length === 0) {
-					alert('No conversation history found. Please have a conversation first.');
-					return;
-				  }
-
-				  const response = await fetch('/api/memory', { 
-					method: 'POST',
-					headers: { 'Content-Type': 'application/json' },
-					body: JSON.stringify({ conversationHistory })
-				  });
-				  const result = await response.json();
-				  console.log('Summary generation response:', result);
-				  alert('Summary generated and stored in vector database!');
-				} catch (error) {
-				  console.error('Error generating summary:', error);
-				  alert('Error generating summary');
-				}
-			  });
-			}
 
 			// Remove Memory button handler
 			const removeMemoryBtn = document.getElementById('removeMemory');
